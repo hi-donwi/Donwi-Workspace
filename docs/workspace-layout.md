@@ -51,7 +51,7 @@ reporting the missing skills until someone syncs them.
 ## The desk
 
 The framework has no web UI. The desk - a floor of clients, projects, and agents with a
-menu drawer and an assistant drawer - is the agent host's UI and lives in Agent-Control
+menu drawer and an assistant drawer - is the agent host's UI and lives in DONWI Desk
 (ADR-0023). `ws chat` starts it on loopback. The host reads workspace records read-only and
 changes them only through `ws`.
 

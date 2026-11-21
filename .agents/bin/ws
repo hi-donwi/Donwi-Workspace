@@ -546,7 +546,7 @@ context_switch() {
 
 # ─────────────────────────────────────────────────────────────── chat / agent-control
 # AI-powered workspace assistant and control web UI.
-# The loopback port of an Agent-Brain gateway the agent host is configured to use: the
+# The loopback port of a DONWI Brain gateway the agent host is configured to use: the
 # `brain` endpoint in .local/agent/endpoints.json. Prints nothing when there is none.
 chat_brain_port() {
   local f="$WS_HOME/.local/agent/endpoints.json"
@@ -561,7 +561,7 @@ PY
 }
 
 # One command for the desk: install and build the agent host when needed, start the
-# Agent-Brain gateway its `brain` endpoint points at (and stop it with the desk), then run
+# DONWI Brain gateway its `brain` endpoint points at (and stop it with the desk), then run
 # the host on loopback.
 cmd_chat() {
   local dev=0 port="" build=0 host="127.0.0.1" brain=auto
@@ -576,7 +576,7 @@ cmd_chat() {
       --host) host="${2:-}"; [ -n "$host" ] || die "--host requires a value"; shift 2 ;;
       --help|-h)
         cat <<'HELP'
-ws chat — the desk: Agent-Control on loopback, with its Agent-Brain gateway
+ws chat — the desk: DONWI Desk on loopback, with its DONWI Brain gateway
 
 Usage:
   ws chat [options]
@@ -586,8 +586,8 @@ Options:
   --port N     specify port (default: 3141)
   --host H     specify host (default: 127.0.0.1)
   --build      rebuild the UI even when it looks current
-  --brain      start an Agent-Brain gateway (port 52140 unless an endpoint names one)
-  --no-brain   do not start the Agent-Brain gateway
+  --brain      start a DONWI Brain gateway (port 52140 unless an endpoint names one)
+  --no-brain   do not start the DONWI Brain gateway
 
 The UI is rebuilt when its sources are newer than the build. When the `brain` endpoint in
 .local/agent/endpoints.json points at a loopback gateway that is not running, `brain serve
@@ -604,8 +604,8 @@ HELP
     local rel_folder; rel_folder="$(reg_get "agent-control" 2>/dev/null | cut -f4 || true)"
     if [ -n "$rel_folder" ] && [ -d "$WS_HOME/$rel_folder" ]; then
       ctrl_dir="$WS_HOME/$rel_folder"
-    elif [ -d "$WS_HOME/projects/donwi/public/Agent-Control" ]; then
-      ctrl_dir="$WS_HOME/projects/donwi/public/Agent-Control"
+    elif [ -d "$WS_HOME/projects/donwi/public/Donwi-Desk" ]; then
+      ctrl_dir="$WS_HOME/projects/donwi/public/Donwi-Desk"
     fi
   fi
   [ -n "$ctrl_dir" ] && [ -d "$ctrl_dir" ] || die "agent-control not found. Register it in registry.tsv or set WS_AGENT_CONTROL_DIR"
@@ -643,9 +643,9 @@ HELP
   fi
   if [ -n "$brain_port" ]; then
     if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$brain_port/healthz"; then
-      c_dim "Agent-Brain gateway already running on port $brain_port"
+      c_dim "DONWI Brain gateway already running on port $brain_port"
     elif command -v brain >/dev/null; then
-      c_grn "-> starting the Agent-Brain gateway: brain serve --cloud-only --port $brain_port"
+      c_grn "-> starting the DONWI Brain gateway: brain serve --cloud-only --port $brain_port"
       mkdir -p "$WS_HOME/.local/agent"
       brain serve --cloud-only --port "$brain_port" > "$WS_HOME/.local/agent/brain-serve.log" 2>&1 &
       brain_pid=$!
@@ -657,7 +657,7 @@ HELP
     fi
   fi
 
-  c_grn "-> launching Agent-Control..."
+  c_grn "-> launching DONWI Desk..."
   export WS_WORKSPACE_ROOT="$WS_HOME"
   [ -n "$port" ] && export PORT="$port"
   [ -n "$host" ] && export HOST="$host"
@@ -742,7 +742,7 @@ HELP
   esac
 }
 
-# Resolve the agent host (Agent-Control) directory: an explicit override wins, then the
+# Resolve the agent host (DONWI Desk) directory: an explicit override wins, then the
 # registry. There is deliberately no fixed checkout path (ADR-0019 §3): the host is a
 # dependency `ws` installs, not a product it knows the location of.
 agent_host_dir() {
@@ -4295,7 +4295,7 @@ PY
   fi
   echo
 
-  echo "-- Agent-Secure --"
+  echo "-- DONWI Secure --"
   if command -v agent-secure >/dev/null; then
     c_grn "ok agent-secure on PATH"
     if [ -d "$WS_HOME/.local/secure/policies" ]; then
@@ -4630,7 +4630,7 @@ cmd_ide() {
 }
 
 # ─────────────────────────────────────────────────────────────── scan
-# Operator-owned Agent-Secure policy, selected by the registry's security_profile.
+# Operator-owned DONWI Secure policy, selected by the registry's security_profile.
 # The scanned product repo must not supply the policy: that would let an untrusted
 # checkout weaken its own gate. Policies live under .local/secure/policies/.
 cmd_scan() {
@@ -4666,8 +4666,8 @@ cmd_scan() {
     policy="$WS_HOME/.local/secure/policies/${name}.json"
   fi
   [ -f "$policy" ] || die "no operator policy at $policy
-    Agent-Secure policies are operator-owned and live outside the product repo.
-    Bootstrap one with Agent-Secure's scripts/bootstrap-policy.sh into
+    DONWI Secure policies are operator-owned and live outside the product repo.
+    Bootstrap one with DONWI Secure's scripts/bootstrap-policy.sh into
     .local/secure/policies/<profile>.json (or default.json), or pass --policy."
 
   local abs_policy abs_root
@@ -5016,7 +5016,7 @@ ws — engineering workspace CLI
                                     list (or remove) idle, clean agent worktrees and stale locks
   ws hours [--month M] [--project k|--client c] [--rollup]   report both, side by side
   ws usage [--month M] [--project k|--client c]  token usage, from a separate optional tool
-  ws chat [--dev] [--port N] [--no-brain]  the desk (Agent-Control) and its Agent-Brain gateway
+  ws chat [--dev] [--port N] [--no-brain]  the desk (DONWI Desk) and its DONWI Brain gateway
   ws atlas [<key>|--all] [--port N]  read the context in a browser, locked to one project
   ws ide                           copy the shared VS Code defaults into this clone
   ws hooks [status|install|remove]  Claude Code hooks, merged into .claude/settings.json
@@ -5025,7 +5025,7 @@ ws — engineering workspace CLI
                                     commit context work; auto mode may publish safely
   ws where                         print the workspace root from anywhere
   ws doctor [--ci]                 check repo isolation, ignores, toolchain
-  ws scan <key> [--doctor] [--policy f]  Agent-Secure gate; policy is operator-owned
+  ws scan <key> [--doctor] [--policy f]  DONWI Secure gate; policy is operator-owned
   ws verify <key> [--contract f] [--run id] [--worktree path] [--json]
                                      execute an operator-owned verification contract; output is sanitized
   ws policy check <key> --action a [--policy f] [--json]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Context and memory auto-compactor for Agent-Workspace.
+"""Context and memory auto-compactor for DONWI Workspace.
 
 Provides:
 1. Memory Compactor: Archives old log.md milestones and closed active runs to keep CONTEXT.md
@@ -338,7 +338,7 @@ def condense_exec(cmd_args: list, max_lines: int = 60, head_lines: int = 25, tai
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Context and memory auto-compactor for Agent-Workspace.")
+    parser = argparse.ArgumentParser(description="Context and memory auto-compactor for DONWI Workspace.")
     subparsers = parser.add_subparsers(dest="command")
 
     # memory command

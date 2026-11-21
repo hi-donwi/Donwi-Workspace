@@ -33,17 +33,17 @@ context/**/.git/
 .kilo/
 .wrangler/
 
-# The Agent-Workspace mirror under projects/ duplicates this repository's own
+# The DONWI Workspace mirror under projects/ duplicates this repository's own
 # instruction payload (AGENTS.md, .agents/, docs/, editor rules). Indexing both
 # copies double-counts every instruction file and inflates agent context; keep
 # only the original in the search index. The mirror stays fully readable by
 # explicit path, and its product code under projects/ is untouched.
-projects/donwi/public/Agent-Workspace/AGENTS.md
-projects/donwi/public/Agent-Workspace/CLAUDE.md
-projects/donwi/public/Agent-Workspace/GEMINI.md
-projects/donwi/public/Agent-Workspace/.agents/
-projects/donwi/public/Agent-Workspace/docs/
-projects/donwi/public/Agent-Workspace/.cursor/
-projects/donwi/public/Agent-Workspace/.github/
-projects/donwi/public/Agent-Workspace/.vscode/
-projects/donwi/public/Agent-Workspace/apps/
+projects/donwi/public/Donwi-Workspace/AGENTS.md
+projects/donwi/public/Donwi-Workspace/CLAUDE.md
+projects/donwi/public/Donwi-Workspace/GEMINI.md
+projects/donwi/public/Donwi-Workspace/.agents/
+projects/donwi/public/Donwi-Workspace/docs/
+projects/donwi/public/Donwi-Workspace/.cursor/
+projects/donwi/public/Donwi-Workspace/.github/
+projects/donwi/public/Donwi-Workspace/.vscode/
+projects/donwi/public/Donwi-Workspace/apps/

@@ -1754,7 +1754,7 @@ SHOW="$(ws plan show api "$PRUN" 2>&1)"
 printf '%s' "$SHOW" | grep -q "^1	done	Write the parser" \
   && ok "ws plan show lists row, status, task" || bad "ws plan show lists row, status, task" "$SHOW"
 
-section "ws chat starts the desk and its Agent-Brain gateway"
+section "ws chat starts the desk and its DONWI Brain gateway"
 # One command for the desk: rebuild when the UI changed, start the gateway the brain
 # endpoint names when it is down, and stop that gateway when the desk stops.
 FAKEHOST="$TMP/fake-agent-control"

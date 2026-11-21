@@ -101,5 +101,5 @@ agent never collide.
 
 - [x] `.ignore`, `.gitattributes`, hardened `ws link` / `doctor` / `where`, `ws log`, `ws sync`
 - [x] Absolute paths removed from tracked files
-- [x] Push the workspace to a remote (`github.com/hi-donwi/Agent-Workspace`)
+- [x] Push the workspace to a remote (`github.com/hi-donwi/Donwi-Workspace`)
 - [x] CI on GitHub Actions (`doctor.yml`); `.gitlab-ci.yml` ships for GitLab clones
