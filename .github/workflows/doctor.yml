@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   security:
-    uses: hi-donwi/Agent-Secure/.github/workflows/agent-secure-gate.yml@1dffc4ca7e00bb4e9aa108603fcf02cfeb1637a8
+    uses: hi-donwi/Donwi-Secure/.github/workflows/agent-secure-gate.yml@1dffc4ca7e00bb4e9aa108603fcf02cfeb1637a8
     with:
       root: .
       engine_version: v0.1.5

@@ -76,7 +76,7 @@ that is free or expensive.
 | `clients/<c>/decisions.md` | Shared, rare | Same again, at client scope. Add a row only once a second project confirms it is client-wide |
 | `memory/projects/<key>/active.md` | Shared, frequent | Keep it short. It is a routing hint; the run is the authority. **Never overwrite Current focus** with another agent's task — `ws run` only appends the Active runs table |
 | `skills/index.json` | Generated | Never merge by hand. Run `ws skills` and commit the regenerated file |
-| Git working tree of the **framework** (`Agent-Workspace`) | **One writer** | `skills.lock`, `ws`, and `AGENTS.md` cannot be edited by four agents on one `HEAD`. Serialize, or use `ws agent start workspace` |
+| Git working tree of the **framework** (`Donwi-Workspace`) | **One writer** | `skills.lock`, `ws`, and `AGENTS.md` cannot be edited by four agents on one `HEAD`. Serialize, or use `ws agent start workspace` |
 | Git working tree of a **product** repo | **One writer per clone** | Four agents on `projects/…/UIDL-Runtime` share one `HEAD`. Isolate with `ws agent start <key>` (git worktree under `.local/worktrees/`) |
 | `.open-agent-*-default.json` | Collision | Parallel agents without `WS_SESSION_ID` share one clock. Set `export WS_SESSION_ID=<session>` (or rely on `GROK_SESSION_ID` / `CODEX_THREAD_ID` / `CURSOR_TRACE_ID`) |
 | `.local/sessions/<session>/*` | One per session id | Bind, pack, and `CONTEXT.md` for this conversation only. Never a workspace-level "active project" file |

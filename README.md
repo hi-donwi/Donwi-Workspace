@@ -1,6 +1,6 @@
-# Agent Workspace
+# DONWI Workspace
 
-[![doctor](https://github.com/hi-donwi/Agent-Workspace/actions/workflows/doctor.yml/badge.svg)](https://github.com/hi-donwi/Agent-Workspace/actions/workflows/doctor.yml)
+[![doctor](https://github.com/hi-donwi/Donwi-Workspace/actions/workflows/doctor.yml/badge.svg)](https://github.com/hi-donwi/Donwi-Workspace/actions/workflows/doctor.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **A shared working contract, binding standards, and durable memory for teams where AI
@@ -21,7 +21,7 @@ This repository is the *how*, kept separate from the *what*:
 
 - **Standards** an agent must follow, in packs you switch on per stack
 - **Skills** — task-shaped instructions an agent reads before starting, pulled from
-  [Agent-Skills](https://github.com/hi-donwi/Agent-Skills) a pack at a time
+  [DONWI Skills](https://github.com/hi-donwi/Donwi-Skills) a pack at a time
 - **Memory and runs** — what happened, what is in flight, what the next session needs
 - **Two clocks** — human hours and agent hours, recorded separately and never summed
 - **A CLI (`ws`)** that wires the repositories together and checks they stay separate

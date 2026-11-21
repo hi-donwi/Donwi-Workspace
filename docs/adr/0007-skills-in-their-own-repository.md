@@ -23,7 +23,7 @@ Skills live in **their own repository**, grouped into packs (`core`, `agent`, `w
 `java`). A workspace declares what it wants in `.agents/skills.manifest`:
 
 ```
-source = git@github.com:hi-donwi/Agent-Skills.git
+source = git@github.com:hi-donwi/Donwi-Skills.git
 ref    = main
 
 pack core

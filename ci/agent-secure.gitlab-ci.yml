@@ -3,7 +3,7 @@
 # GitHub cannot be included from GitLab CI, so this template is COPIED into
 # the client repository (or a GitLab template project) rather than included
 # remotely. Keep it in sync with
-# hi-donwi/Agent-Secure/.github/workflows/agent-secure-gate.yml.
+# hi-donwi/Donwi-Secure/.github/workflows/agent-secure-gate.yml.
 #
 # Usage in the client repo's .gitlab-ci.yml:
 #
@@ -37,7 +37,7 @@
   before_script:
     - apk add --no-cache curl tar jq python3
     - mkdir -p /tmp/as/bin /tmp/as/tools && cd /tmp/as/tools
-    - "curl -fsSL --retry 3 -o /tmp/as/bin/agent-secure https://github.com/hi-donwi/Agent-Secure/releases/download/${ENGINE_VERSION}/agent-secure-linux-amd64"
+    - "curl -fsSL --retry 3 -o /tmp/as/bin/agent-secure https://github.com/hi-donwi/Donwi-Secure/releases/download/${ENGINE_VERSION}/agent-secure-linux-amd64"
     - echo "${ENGINE_SHA256}  /tmp/as/bin/agent-secure" | sha256sum -c -
     - "curl -fsSL --retry 3 -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
     - echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
