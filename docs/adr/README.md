@@ -44,3 +44,4 @@ An ADR with no rejected alternatives records a preference, not a decision.
 | [0025](0025-project-kinds.md) | Project kinds | Accepted | 2026-10-18 |
 | [0026](0026-source-linked-localization.md) | Source-linked localization | Partially superseded by 0027 | 2026-11-09 |
 | [0027](0027-language-default-not-mandate.md) | English as a default, not a requirement | Accepted | 2026-11-09 |
+| [0028](0028-publisher-branding-outside-the-contract.md) | Publisher branding stays outside the contract | Accepted | 2026-11-21 |
