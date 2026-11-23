@@ -50,12 +50,17 @@ atlas_dir =
 # volume has less free space than min_free_disk_gb. `ws agent clean` treats a
 # stopped agent's worktree as idle once worktree_idle_hours have passed since its
 # last git activity. A session lock counts as stale after max_agent_session_hours
-# without activity, when no process works inside the worktree.
+# without activity, when no process works inside the worktree. Before removing a
+# worktree it archives the files Git ignores that a rebuild does not recreate (.env,
+# local settings) under .local/worktree-archive/; a worktree whose files are larger
+# than worktree_archive_max_mb is kept instead, and 0 keeps every such worktree.
 min_free_disk_gb = 20
 worktree_idle_hours = 24
+worktree_archive_max_mb = 50
 
 # A new agent worktree gets the primary checkout's node_modules as copy-on-write clones
-# (APFS, or a reflink filesystem) when the lockfile matches; nothing is copied in full.
+# (APFS, or a reflink filesystem); nothing is copied in full. When the lockfile differs,
+# update the clone in place with npm install (never npm ci, which deletes it).
 # `ws agent prune` drops these git-ignored directories from worktrees idle for
 # worktree_idle_hours; leave agent_prune_dirs empty to keep the built-in list.
 agent_clone_deps = on

@@ -142,6 +142,14 @@ containing generated pointers. The exclude entry keeps them out of `git status`;
 stops `git add -f`. An existing hook that is not ours is never overwritten — `ws link` says so and
 leaves it alone.
 
+It installs a `post-checkout` hook as well, so a worktree that another tool adds (`git worktree
+add`, an editor, another agent's harness) gets the primary checkout's `node_modules` as a
+copy-on-write clone, the same as one from `ws agent start`: the hook runs `ws agent deps` in each
+new linked worktree and never fails the checkout. It goes only into the repository's own
+`.git/hooks`; with a `core.hooksPath` outside `.git` (husky, a shared hooks folder) or a
+`post-checkout` hook that is not ours, `ws link` installs nothing and names `ws agent deps <path>`
+to run by hand. `ws unlink` removes both hooks.
+
 ### Local agent preferences
 
 Machine-local instructions that should not be published belong under `.local/rules/`:

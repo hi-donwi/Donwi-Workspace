@@ -1499,7 +1499,41 @@ context_repo=${external:--}
 generated=$(date +%F)
 MARK
   install_guard_hook "$dst"
+  install_deps_hook "$dst"
   c_grn "-> $folder/$(basename "$pointer") written (untracked, excluded)"
+}
+
+# Worktrees that other tools add (git worktree add, an editor, another agent's harness)
+# otherwise start with no node_modules, and the first install there is a full copy. Git
+# runs post-checkout in a new worktree with an all-zero previous HEAD; the hook then runs
+# `ws agent deps`, and never fails the checkout. It is written only into the repository's
+# own hooks directory: a core.hooksPath inside the working tree or shared by other
+# repositories, or a hook that is not ours, is left alone.
+install_deps_hook() {
+  local dst="$1" hook common
+  hook="$(git_path "$dst" hooks/post-checkout)"
+  common="$(git -C "$dst" rev-parse --path-format=absolute --git-common-dir)"
+  case "$hook" in
+    "$common"/*) ;;
+    *) c_dim "  post-checkout hook not installed (core.hooksPath is outside .git); fill other tools' worktrees with: ws agent deps <path>"; return 0 ;;
+  esac
+  if [ -L "$hook" ] || { [ -f "$hook" ] && ! grep -q '^# ws-deps:' "$hook"; }; then
+    c_dim "  post-checkout hook exists and is not ours; fill other tools' worktrees with: ws agent deps <path>"
+    return 0
+  fi
+  mkdir -p "$(dirname "$hook")"
+  {
+    printf '#!/bin/sh\n'
+    printf '# ws-deps: clone node_modules from the primary checkout into new linked worktrees\n'
+    printf '# Installed by `ws link`. Remove the file to disable.\n'
+    printf 'case "$1" in ""|*[!0]*) exit 0 ;; esac\n'
+    printf '[ -z "${WS_NO_DEPS_HOOK:-}" ] || exit 0\n'
+    printf '[ "$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)" != "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ] || exit 0\n'
+    printf 'ws=%s\n' "$(printf '%s' "$WS_HOME/.agents/bin/ws" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"
+    printf '[ -x "$ws" ] && "$ws" agent deps . || true\n'
+    printf 'exit 0\n'
+  } > "$hook"
+  chmod +x "$hook"
 }
 
 # .git/info/exclude keeps the pointers out of `git status`. The hook is the second
@@ -1557,6 +1591,8 @@ cmd_unlink() {
   fi
   hook="$(git_path "$dst" hooks/pre-commit)"
   if [ ! -L "$hook" ] && [ -f "$hook" ] && grep -q '^# ws-guard:' "$hook"; then rm -f "$hook"; fi
+  hook="$(git_path "$dst" hooks/post-checkout)"
+  if [ ! -L "$hook" ] && [ -f "$hook" ] && grep -q '^# ws-deps:' "$hook"; then rm -f "$hook"; fi
   c_grn "-> pointer removed from $folder"
 }
 
@@ -2578,10 +2614,11 @@ cmd_agent() {
     stop) shift; agent_stop "$@" ;;
     clean) shift; agent_clean "$@" ;;
     prune) shift; agent_prune "$@" ;;
+    deps) shift; agent_deps "$@" ;;
     status) clock_status ;;
     auto) shift; agent_auto "${1:-}" ;;
     activity) shift; agent_activity "$@" ;;
-    *) die "usage: ws agent [in <key> [note] | start <key> [note] | stop [note] | clean [--project <key>] [--apply] [--idle-hours <n>] | prune [--apply] [--idle-hours <n>] | out [note] | recover [--all] [--dry-run] [--end <iso>] | status | auto in|out|end | activity <state> [detail]|off]" ;;
+    *) die "usage: ws agent [in <key> [note] | start <key> [note] | stop [note] | clean [--project <key>] [--apply] [--idle-hours <n>] | prune [--apply] [--idle-hours <n>] | deps [path] | out [note] | recover [--all] [--dry-run] [--end <iso>] | status | auto in|out|end | activity <state> [detail]|off]" ;;
   esac
 }
 
@@ -2707,15 +2744,15 @@ agent_start() {
   else
     local br; br="$(slug "agent-$session-$key")"
     if git -C "$dst" show-ref --verify --quiet "refs/heads/$br"; then
-      git -C "$dst" worktree add "$wt" "$br"
+      WS_NO_DEPS_HOOK=1 git -C "$dst" worktree add "$wt" "$br"
       agent_clone_deps "$dst" "$wt"
     elif git -C "$dst" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
-      git -C "$dst" worktree add -b "$br" "$wt"
+      WS_NO_DEPS_HOOK=1 git -C "$dst" worktree add -b "$br" "$wt"
       agent_clone_deps "$dst" "$wt"
     else
       local baseline; baseline="$(agent_snapshot_commit "$dst")" \
         || die "could not create a local baseline for the unborn repository: $dst"
-      git -C "$dst" worktree add -b "$br" "$wt" "$baseline"
+      WS_NO_DEPS_HOOK=1 git -C "$dst" worktree add -b "$br" "$wt" "$baseline"
       agent_copy_nested_repositories "$dst" "$wt" \
         || die "could not copy nested repositories into the isolated worktree: $dst"
       c_ylw "! $key has no commit history - isolated worktree uses a local snapshot baseline"
@@ -2799,19 +2836,21 @@ changed_mtime() {
   newest_mtime ${files[@]+"${files[@]}"}
 }
 
-# Working directory of every running process, one real path per line. Empty output
-# means the processes could not be seen, and callers then treat every worktree as in use.
-process_cwds() {
+# Working directory and executable of every running process, one real path per line: an
+# app started from a worktree's build output keeps that worktree in use even when its
+# working directory is elsewhere. Empty output means the processes could not be seen,
+# and callers then treat every worktree as in use.
+process_paths() {
   local processes p
-  if command -v lsof >/dev/null 2>&1 && processes="$(lsof -w -d cwd -Fn 2>/dev/null)"; then
+  if command -v lsof >/dev/null 2>&1 && processes="$(lsof -w -d cwd,txt -Fn 2>/dev/null)"; then
     printf '%s\n' "$processes" | sed -n 's/^n//p'
   elif [ -d /proc/self ]; then
-    for p in /proc/[0-9]*/cwd; do readlink "$p" 2>/dev/null || true; done
+    for p in /proc/[0-9]*/cwd /proc/[0-9]*/exe; do readlink "$p" 2>/dev/null || true; done
   fi
   return 0
 }
 
-# worktree_in_use <real path> <cwd list>
+# worktree_in_use <real path> <process path list>
 worktree_in_use() {
   [ -n "$2" ] || return 0
   printf '%s\n' "$2" | awk -v p="$1" '$0 == p || index($0, p "/") == 1 { f = 1 } END { exit !f }'
@@ -2857,15 +2896,85 @@ drop_session_lock() {
 }
 
 # Stopped sessions leave their worktrees under .local/worktrees/, each with its own
-# dependencies and build output. Cleanup keeps worktrees that have local files,
-# including files Git ignores.
+# dependencies and build output. Cleanup removes a worktree only when git has nothing
+# uncommitted or untracked in it and its HEAD is on a branch. Ignored files split in
+# two: regenerable output (agent_prune_dirs and the caches below) goes with the
+# worktree, and anything else Git ignores (.env, local settings, notes) is archived
+# under .local/worktree-archive/ first, or keeps the worktree when it is larger than
+# worktree_archive_max_mb (0 keeps every worktree that has such files).
 #
 # Agents rarely run `ws agent stop`, so a lock alone does not prove a live session. A
 # lock is stale once its worktree saw no git or file activity for
-# max_agent_session_hours and no process has its working directory inside; --apply
-# drops it, and drops orphan locks whose worktree is gone.
+# max_agent_session_hours and no process works or runs inside; --apply drops it, and
+# drops orphan locks whose worktree is gone.
+AGENT_CACHE_NAMES='__pycache__ .pytest_cache .mypy_cache .ruff_cache .cache .vite .eslintcache .gradle .DS_Store *.pyc *.tsbuildinfo'
+
+# agent_local_ignored <worktree>: the ignored paths in it that a rebuild does not
+# recreate, NUL-separated and relative to the worktree, as git status reports them (a
+# wholly ignored directory is one path).
+agent_local_ignored() {
+  local wt="$1" entry name pat pats keep
+  read -r -a pats <<< "$(conf_get agent_prune_dirs "$AGENT_PRUNE_DIRS") $AGENT_CACHE_NAMES"
+  while IFS= read -r -d '' entry; do
+    case "$entry" in '!! '*) ;; *) continue ;; esac
+    entry="${entry#'!! '}"; name="${entry%/}"; name="${name##*/}"; keep=1
+    for pat in "${pats[@]}"; do
+      # shellcheck disable=SC2254 # the names are patterns
+      case "$name" in $pat) keep=0; break ;; esac
+    done
+    if [ "$keep" = 1 ]; then printf '%s\0' "$entry"; fi
+  done < <(git --no-optional-locks -C "$wt" status --porcelain=v1 -z --ignored=matching \
+             --untracked-files=all --ignore-submodules=none 2>/dev/null)
+  return 0
+}
+
+# agent_local_kb <worktree>: the disk the local ignored paths take, in KB.
+agent_local_kb() {
+  local wt="$1" p kb total=0
+  while IFS= read -r -d '' p; do
+    kb="$(du -sk "$wt/$p" 2>/dev/null | cut -f1)" || true
+    total=$((total + ${kb:-0}))
+  done < <(agent_local_ignored "$wt")
+  printf '%s' "$total"
+}
+
+# agent_archive_local <worktree> <primary>: tar the worktree's local ignored paths into
+# .local/worktree-archive/<date>/<key>/<session>/ (owner-only) with a README to restore
+# them, and check the archive reads back. Prints the archive folder relative to the
+# workspace; fails and leaves nothing behind when any step does.
+agent_archive_local() {
+  local wt="$1" primary="$2" base dest n=1 head branch
+  base="$WS_HOME/.local/worktree-archive/$(date +%F)/$(basename "$(dirname "$wt")")/$(basename "$wt")"
+  dest="$base"
+  while [ -e "$dest" ]; do n=$((n + 1)); dest="$base.$n"; done
+  (umask 077; mkdir -p "$dest") || return 1
+  agent_local_ignored "$wt" > "$dest/.paths"
+  n="$(tr -cd '\0' < "$dest/.paths" | wc -c | tr -d ' ')"
+  if [ "$n" -gt 0 ] \
+    && (umask 077; tar -czf "$dest/ignored.tgz" -C "$wt" --null -T "$dest/.paths") 2>/dev/null \
+    && tar -tzf "$dest/ignored.tgz" >/dev/null 2>&1; then
+    rm -f "$dest/.paths"
+  else
+    rm -rf "$dest"; return 1
+  fi
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || head=""
+  branch="$(git -C "$wt" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
+  (umask 077; cat > "$dest/README.txt") <<EOF || { rm -rf "$dest"; return 1; }
+worktree=$wt
+primary=$primary
+branch=$branch
+head=$head
+reason=ws agent clean removed an idle worktree; these are the files in it that Git ignores and a rebuild does not recreate
+files=$n
+restore=git -C <primary> worktree add <path> $head && tar -xzf ignored.tgz -C <path>
+EOF
+  printf '%s' "${dest#"$WS_HOME"/}"
+}
+
+# Prints the worktree's cleanup state: clean, local:<n> (clean apart from n local
+# ignored paths), or why it is kept.
 agent_worktree_state() {
-  local wt="$1" status line ignored=0 branches
+  local wt="$1" status line ignored=0 branches n
   # Optional index writes would make a preview look like recent activity.
   if ! status="$(git --no-optional-locks -C "$wt" status --porcelain=v1 --ignored=matching --untracked-files=all --ignore-submodules=none 2>&1)"; then
     printf 'git status failed'
@@ -2879,13 +2988,13 @@ agent_worktree_state() {
       *) printf 'uncommitted or untracked files'; return ;;
     esac
   done <<< "$status"
-  if [ "$ignored" = 1 ]; then
-    printf 'ignored local files'
   # A detached HEAD is safe once a local or remote-tracking branch contains it.
-  elif ! branches="$(git -C "$wt" for-each-ref --count=1 --contains HEAD refs/heads refs/remotes 2>/dev/null)"; then
+  if ! branches="$(git -C "$wt" for-each-ref --count=1 --contains HEAD refs/heads refs/remotes 2>/dev/null)"; then
     printf 'cannot check branch reachability'
   elif [ -z "$branches" ]; then
     printf 'HEAD is on no branch'
+  elif [ "$ignored" = 1 ] && n="$(agent_local_ignored "$wt" | tr -cd '\0' | wc -c | tr -d ' ')" && [ "$n" -gt 0 ]; then
+    printf 'local:%s' "$n"
   else
     printf 'clean'
   fi
@@ -2918,17 +3027,19 @@ agent_clean() {
   else
     worktrees=("$base"/*/*/)
   fi
+  local cap; cap="$(conf_get worktree_archive_max_mb 50)"
+  case "$cap" in ''|*[!0-9]*) die "worktree_archive_max_mb takes a whole number of MB" ;; esac
   local lockdirs; lockdirs="$(agent_lock_dirs)"
-  local cwds now wt wt_real rel cdir gdir lock lock_mtime note primary last changed age state kb total=0 count=0
-  local dir f lockwt orphans=0
+  local paths now wt wt_real rel cdir gdir lock lock_mtime note primary last changed age state kb total=0 count=0
+  local dir f lockwt orphans=0 nlocal lkb archived
   now="$(date +%s)"
-  cwds="$(process_cwds)"
+  paths="$(process_paths)"
   for wt in "${worktrees[@]}"; do
     wt="${wt%/}"
     [ -f "$wt/.git" ] && [ ! -L "$wt" ] && [ ! -L "${wt%/*}" ] || continue
     rel="${wt#"$WS_HOME"/}"
     wt_real="$(cd "$wt" && pwd -P)" || continue
-    if worktree_in_use "$wt_real" "$cwds"; then c_dim "  keep  $rel (active session)"; continue; fi
+    if worktree_in_use "$wt_real" "$paths"; then c_dim "  keep  $rel (active session)"; continue; fi
     cdir="$(agent_git_dir "$wt")" || cdir=""
     gdir="$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || gdir=""
     if [ -z "$cdir" ] || [ -z "$gdir" ]; then c_ylw "  ! $rel is not a readable worktree"; continue; fi
@@ -2953,12 +3064,26 @@ agent_clean() {
     if [ "$age" -lt "$idle" ]; then state="used ${age}h ago"
     else state="$(agent_worktree_state "$wt")"
     fi
-    if [ "$state" = clean ]; then
-      kb="$(du -sk "$wt" 2>/dev/null | cut -f1)" || true; kb="${kb:-0}"
-      if [ "$apply" = 1 ]; then state="$(agent_worktree_state "$wt")"; fi
-    fi
+    case "$state" in
+      clean|local:*)
+        kb="$(du -sk "$wt" 2>/dev/null | cut -f1)" || true; kb="${kb:-0}"
+        if [ "$apply" = 1 ]; then state="$(agent_worktree_state "$wt")"; fi ;;
+    esac
+    nlocal=0
+    case "$state" in
+      local:*)
+        nlocal="${state#local:}"
+        lkb="$(agent_local_kb "$wt")"
+        if [ "$cap" -eq 0 ]; then
+          state="ignored local files"
+        elif [ "$lkb" -gt $((cap * 1024)) ]; then
+          state="$nlocal ignored local path(s), $((lkb / 1024)) MB, over worktree_archive_max_mb"
+        else
+          state=clean
+        fi ;;
+    esac
     if [ "$apply" = 1 ] && { [ "$state" = clean ] || [ -n "$note" ]; }; then
-      if worktree_in_use "$wt_real" "$(process_cwds)" || [ "$lock_mtime" != "$(newest_mtime "$lock")" ]; then
+      if worktree_in_use "$wt_real" "$(process_paths)" || [ "$lock_mtime" != "$(newest_mtime "$lock")" ]; then
         c_dim "  keep  $rel (active session)"; continue
       fi
       if [ -n "$note" ] && [ "$state" != "git status failed" ]; then
@@ -2967,11 +3092,18 @@ agent_clean() {
     fi
     if [ "$state" != clean ]; then c_dim "  keep  $rel ($state${note:+; $note})"; continue; fi
     if [ "$apply" = 0 ]; then
+      if [ "$nlocal" -gt 0 ]; then note="archives $nlocal local path(s)${note:+, $note}"; fi
       echo "  clean $rel ($((kb / 1024)) MB${note:+, $note})"
     else
       primary="$(git -C "$wt" worktree list --porcelain | sed -n '1s/^worktree //p')" || primary=""
-      if [ -n "$primary" ] && git -C "$primary" worktree remove "$wt" 2>/dev/null; then
-        c_grn "  removed $rel ($((kb / 1024)) MB)"
+      if [ -z "$primary" ]; then c_ylw "  ! cannot find the primary checkout of $rel - inspect it"; continue; fi
+      archived=""
+      if [ "$nlocal" -gt 0 ] && ! archived="$(agent_archive_local "$wt" "$primary")"; then
+        c_ylw "  ! could not archive the ignored local files of $rel - kept"; continue
+      fi
+      # Without --force, git refuses a worktree that gained changes since the check.
+      if git -C "$primary" worktree remove "$wt" 2>/dev/null; then
+        c_grn "  removed $rel ($((kb / 1024)) MB${archived:+; local files in $archived})"
         rmdir "$(dirname "$wt")" 2>/dev/null || true
       else
         c_ylw "  ! git refused to remove $rel (locked or changed) - inspect it"; continue
@@ -3301,19 +3433,6 @@ auto_project_key() {
 DEPS_LOCKFILES="package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb"
 AGENT_PRUNE_DIRS="node_modules .next .turbo .svelte-kit .parcel-cache .wrangler .dart_tool build dist target coverage test-results playwright-report"
 
-# Working directory and executable of every running process, one real path per line: an
-# app started from a worktree's build output keeps that worktree in use even when its
-# working directory is elsewhere. Empty output means the processes could not be seen.
-process_paths() {
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -w -d cwd,txt -Fn 2>/dev/null | sed -n 's/^n//p'
-  elif [ -d /proc/self ]; then
-    local p
-    for p in /proc/[0-9]*/cwd /proc/[0-9]*/exe; do readlink "$p" 2>/dev/null; done
-  fi
-  return 0
-}
-
 # The linked worktrees of one repository, primary checkout left out.
 agent_repo_worktrees() {
   local p
@@ -3391,13 +3510,25 @@ nearest_lockfile() {
   done
 }
 
+# The install command that updates an existing node_modules in place for a lockfile.
+deps_install_cmd() {
+  case "${1##*/}" in
+    pnpm-lock.yaml) printf 'pnpm install' ;;
+    yarn.lock) printf 'yarn install' ;;
+    bun.lock|bun.lockb) printf 'bun install' ;;
+    *) printf 'npm install' ;;
+  esac
+}
+
 # agent_clone_deps <primary> <worktree>: give a new worktree the primary checkout's
-# node_modules as copy-on-write clones, each only when the lockfile that governs it is
-# identical in both trees. A clone takes seconds and almost no disk until a file in it
-# changes. Only installs inside the tracked tree qualify, never another worktree's.
+# node_modules as copy-on-write clones. A clone takes seconds and almost no disk until a
+# file in it changes. When the worktree's lockfile differs, the clone is still the
+# cheapest start: the package manager's install rewrites only the packages that differ,
+# while `npm ci` deletes node_modules and with it everything the clone shared. Only
+# installs inside the tracked tree qualify, never another worktree's.
 # agent_clone_deps = off in workspace.conf turns it off.
 agent_clone_deps() {
-  local src="$1" wt="$2" dir rel parent lock n=0 unavailable=0
+  local src="$1" wt="$2" dir rel parent lock n=0 unavailable=0 stale=""
   case "$(conf_get agent_clone_deps on)" in off|no|false|0) return 0 ;; esac
   while IFS= read -r dir; do
     rel="${dir#"$src"/}"; parent="$(dirname "$rel")"
@@ -3406,20 +3537,41 @@ agent_clone_deps() {
     [ ! -e "$wt/$rel" ] || continue
     git -C "$src" check-ignore -q -- "$rel/x" 2>/dev/null || continue
     lock="$(nearest_lockfile "$src" "$parent")" || continue
-    if ! cmp -s "$src/$lock" "$wt/$lock"; then
-      c_dim "  dependencies: $rel not cloned, its lockfile differs from the primary checkout"
-      continue
-    fi
+    [ -f "$wt/$lock" ] || continue
     [ "$unavailable" = 0 ] || continue
-    if cow_clone_dir "$dir" "$wt/$rel"; then n=$((n + 1)); else unavailable=1; fi
+    if cow_clone_dir "$dir" "$wt/$rel"; then
+      n=$((n + 1))
+      if ! cmp -s "$src/$lock" "$wt/$lock"; then
+        stale=1
+        c_ylw "  dependencies: $rel cloned, but $lock differs from the primary checkout - update it in place with: $(deps_install_cmd "$lock")"
+      fi
+    else
+      unavailable=1
+    fi
   done < <(find "$src" -maxdepth 4 \( -name .git -o -name .local \) -prune -o \
              -type d -name node_modules -print -prune 2>/dev/null | sort)
   if [ "$n" -gt 0 ]; then
-    c_grn "-> cloned $n node_modules dir(s) from the primary checkout (copy-on-write); reinstall only when a lockfile changes"
+    c_grn "-> cloned $n node_modules dir(s) from the primary checkout (copy-on-write)"
+    c_dim "   after a lockfile change run the package manager's install, not npm ci: npm ci deletes the clone and installs a full copy${stale:+ (needed now, see above)}"
   elif [ "$unavailable" = 1 ]; then
     c_dim "  dependencies: copy-on-write cloning is not available here; install them in the worktree"
   fi
   return 0
+}
+
+# ws agent deps [path]: the same clone for a linked worktree that `ws agent start` did
+# not make (git worktree add, an editor, another agent's harness). Fills only missing
+# node_modules; the primary checkout is the source and never a target.
+agent_deps() {
+  local path="${1:-.}" top gdir common primary
+  [ $# -le 1 ] || die "usage: ws agent deps [path]"
+  top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git worktree: $path"
+  gdir="$(git -C "$top" rev-parse --path-format=absolute --git-dir)"
+  common="$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)"
+  [ "$gdir" != "$common" ] || die "$top is a primary checkout - ws agent deps fills a linked worktree from it"
+  primary="$(git -C "$top" worktree list --porcelain | sed -n '1s/^worktree //p')"
+  [ -n "$primary" ] && [ -d "$primary" ] || die "cannot find the primary checkout of $top"
+  agent_clone_deps "$primary" "$top"
 }
 
 # Idle worktrees keep their installs and build output long after the work stops, and
@@ -4083,6 +4235,7 @@ cmd_doctor() {
       c_ylw "! $(printf '%s\n' "$unmanaged" | wc -l | tr -d ' ') git worktree(s) outside .local/worktrees/<key>/<session> - ws agent clean never removes them"
       printf '%s\n' "$unmanaged" | head -5 | sed 's/^/      /'
       c_dim "    make agent worktrees with ws agent start <key>; ws agent prune covers the ones inside the workspace"
+      c_dim "    give one the shared install instead of a full one: ws agent deps <path>"
     fi
     echo
   fi
@@ -5290,9 +5443,12 @@ ws — engineering workspace CLI
   ws agent stop [note]              clock-out and drop this session's lock
   ws agent activity <state>|off     what this session is doing, for the desk
   ws agent clean [--project K] [--apply] [--idle-hours N]
-                                    list (or remove) idle, clean agent worktrees and stale locks
+                                    list (or remove) idle, clean agent worktrees and stale locks;
+                                    ignored local files are archived first
   ws agent prune [--apply] [--idle-hours N]
                                     list (or remove) installs and build output in idle worktrees
+  ws agent deps [path]              clone the primary checkout's node_modules into a worktree
+                                    another tool made (ws link's post-checkout hook does it too)
   ws hours [--month M] [--project k|--client c] [--rollup]   report both, side by side
   ws usage [--month M] [--project k|--client c]  token usage, from a separate optional tool
   ws chat [--dev] [--port N] [--no-brain]  the desk (DONWI Desk) and its DONWI Brain gateway

@@ -953,15 +953,32 @@ kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null || true
 for s in wt5 wt6 wt7; do WS_SESSION_ID=$s ws agent stop >/dev/null 2>&1; done
 
 section "project-scoped worktree cleanup safety"
-for s in scoped-clean scoped-ignored scoped-process scoped-git-error; do
+for s in scoped-clean scoped-ignored scoped-process scoped-git-error scoped-regen scoped-big scoped-exe; do
   WS_SESSION_ID=$s ws agent start api >/dev/null 2>&1
   WS_SESSION_ID=$s ws agent stop >/dev/null 2>&1
 done
 WS_SESSION_ID=other-clean ws agent start otherp >/dev/null 2>&1
 WS_SESSION_ID=other-clean ws agent stop >/dev/null 2>&1
 OTHER_WT="$WS/.local/worktrees/otherp"
-printf '\n/.local-secret\n' >> "$gdir/info/exclude"
+printf '\n/.local-secret\n/.local-big\nnode_modules/\n__pycache__/\n*.tsbuildinfo\n' >> "$gdir/info/exclude"
 printf 'local configuration\n' > "$WT/scoped-ignored/.local-secret"
+mkdir -p "$WT/scoped-ignored/node_modules/dep"
+printf 'module.exports = 1\n' > "$WT/scoped-ignored/node_modules/dep/index.js"
+# Regenerable output alone does not keep a worktree: an install, a bytecode cache, and
+# a compiler's incremental state all come back with the next build.
+mkdir -p "$WT/scoped-regen/node_modules/dep" "$WT/scoped-regen/src/__pycache__"
+printf 'module.exports = 1\n' > "$WT/scoped-regen/node_modules/dep/index.js"
+printf 'bytecode\n' > "$WT/scoped-regen/src/__pycache__/m.cpython-312.pyc"
+printf '{}\n' > "$WT/scoped-regen/tsconfig.tsbuildinfo"
+# Local files larger than worktree_archive_max_mb keep the worktree instead.
+dd if=/dev/zero of="$WT/scoped-big/.local-big" bs=1024 count=1536 2>/dev/null
+printf '\nworktree_archive_max_mb = 1\n' >> "$WS/workspace.conf"
+# A program started from a worktree's install keeps it in use while its working
+# directory is elsewhere and no session lock is left.
+mkdir -p "$WT/scoped-exe/node_modules/.bin"
+cp "$(command -v sleep)" "$WT/scoped-exe/node_modules/.bin/holder"
+# Started from a subshell that exits at once, so this shell never reports its end.
+HOLD_EXE="$( (cd "$TMP" && exec "$WT/scoped-exe/node_modules/.bin/holder" 60) >/dev/null 2>&1 & echo $! )"
 printf 'project=api\nworktree=%s\n' "$WT/scoped-gone" > "$gdir/ws-agent-sessions/scoped-gone.lock"
 printf 'project=otherp\nworktree=%s\n' "$OTHER_WT/other-gone" > "$gdir/ws-agent-sessions/other-gone.lock"
 printf 'project=api\nworktree=%s\n' "$WT/shared-gone" > "$gdir/ws-agent-sessions/shared-gone.lock"
@@ -979,6 +996,15 @@ printf '%s' "$CLEAN_OUT" | grep -q 'clean .local/worktrees/api/scoped-clean' \
   && ! printf '%s' "$CLEAN_OUT" | grep -qE 'other-clean|other-gone' \
   && ok "scope limits both the worktree and orphan lock preview" \
   || bad "scope limits both the worktree and orphan lock preview" "$CLEAN_OUT"
+printf '%s' "$CLEAN_OUT" | grep -q 'clean .local/worktrees/api/scoped-ignored (0 MB, archives 1 local path(s))' \
+  && ok "the preview says which worktrees it archives local files from" \
+  || bad "the preview says which worktrees it archives local files from" "$CLEAN_OUT"
+printf '%s' "$CLEAN_OUT" | grep -q 'clean .local/worktrees/api/scoped-regen (0 MB)' \
+  && ok "regenerable ignored output alone does not keep a worktree" \
+  || bad "regenerable ignored output alone does not keep a worktree" "$CLEAN_OUT"
+printf '%s' "$CLEAN_OUT" | grep -q 'keep  .local/worktrees/api/scoped-big (1 ignored local path(s), 1 MB, over worktree_archive_max_mb)' \
+  && ok "local files over the archive cap keep the worktree" \
+  || bad "local files over the archive cap keep the worktree" "$CLEAN_OUT"
 exists "$WT/scoped-clean/.git" "scoped preview leaves the selected worktree in place"
 check_fails "worktree cleanup refuses unknown projects" ws agent clean --project unknown-cleanup-project --apply
 check_fails "worktree cleanup needs a project key" ws agent clean --project
@@ -1002,10 +1028,33 @@ printf '%s' "$CLEAN_OUT" | grep -q 'scoped-git-error (git status failed)' \
   || bad "failed Git status is visible in the cleanup report" "$CLEAN_OUT"
 exists "$WT/scoped-git-error/.git" "failed Git status prevents worktree deletion"
 
+EXE_RUNS=0
+if kill -0 "$HOLD_EXE" 2>/dev/null; then EXE_RUNS=1; fi
 check "scoped cleanup removes eligible worktrees" ws agent clean --project api --apply --idle-hours 0
 not_exists "$WT/scoped-clean" "scoped cleanup removed the eligible worktree"
-exists "$WT/scoped-ignored/.local-secret" "cleanup preserves ignored local configuration"
+not_exists "$WT/scoped-regen" "cleanup removes a worktree that holds only regenerable output"
+not_exists "$WT/scoped-ignored" "cleanup removes a worktree once its local files are archived"
+ARCHIVE="$(find "$WS/.local/worktree-archive" -type d -path '*/api/scoped-ignored' 2>/dev/null | head -1)"
+exists "$ARCHIVE/ignored.tgz" "the local files are archived before the worktree goes"
+tar -tzf "$ARCHIVE/ignored.tgz" 2>/dev/null | grep -qx '.local-secret' \
+  && ok "the archive holds the ignored local configuration" \
+  || bad "the archive holds the ignored local configuration" "$(tar -tzf "$ARCHIVE/ignored.tgz" 2>&1)"
+tar -tzf "$ARCHIVE/ignored.tgz" 2>/dev/null | grep -q 'node_modules' \
+  && bad "the archive leaves regenerable output out" "$(tar -tzf "$ARCHIVE/ignored.tgz" 2>&1)" \
+  || ok "the archive leaves regenerable output out"
+contains "$ARCHIVE/README.txt" "restore=git -C <primary> worktree add <path>" "the archive says how to restore it"
+[ "$(ls -ld "$ARCHIVE" | cut -c1-10)" = drwx------ ] \
+  && ok "the archive is readable by its owner only" \
+  || bad "the archive is readable by its owner only" "$(ls -ld "$ARCHIVE")"
+exists "$WT/scoped-big/.local-big" "local files over the archive cap stay in place"
 exists "$WT/scoped-process/.git" "cleanup keeps a worktree with a running process and no lock"
+if [ "$EXE_RUNS" = 1 ]; then
+  exists "$WT/scoped-exe/.git" "cleanup keeps a worktree whose program runs from elsewhere"
+else
+  dim "  skip running-executable check (a copied executable cannot run here)"
+fi
+sed -i.bak '/^worktree_archive_max_mb = 1$/d' "$WS/workspace.conf" && rm -f "$WS/workspace.conf.bak"
+kill "$HOLD_EXE" 2>/dev/null || true
 exists "$OTHER_WT/other-clean/.git" "scoped apply leaves another project's clean worktree in place"
 exists "$gdir/ws-agent-sessions/other-gone.lock" "scoped apply leaves another project's orphan lock in place"
 not_exists "$gdir/ws-agent-sessions/scoped-gone.lock" "scoped apply removes the selected project's orphan lock"
@@ -2862,11 +2911,23 @@ else
 fi
 not_exists "$DWT/deps1/.local" "an install outside the tracked tree is never cloned"
 printf '{"lockfileVersion":3,"changed":true}\n' > "$DEPS/package-lock.json"
+# The primary install now comes from another lockfile than the worktree's. A clone that
+# the package manager updates in place still shares every package that did not change.
 START_OUT="$(WS_SESSION_ID=deps2 ws agent start deps "new lockfile" 2>&1)"
-printf '%s' "$START_OUT" | grep -q "lockfile differs" \
-  && ok "ws agent start does not clone an install built from another lockfile" \
-  || bad "ws agent start does not clone an install built from another lockfile" "$START_OUT"
-not_exists "$DWT/deps2/node_modules" "the worktree gets no stale install"
+if printf '%s' "$START_OUT" | grep -q "cloned 2 node_modules"; then
+  printf '%s' "$START_OUT" | grep -q "node_modules cloned, but package-lock.json differs from the primary checkout - update it in place with: npm install" \
+    && ok "ws agent start clones an install built from another lockfile and says to update it in place" \
+    || bad "ws agent start clones an install built from another lockfile and says to update it in place" "$START_OUT"
+  printf '%s' "$START_OUT" | grep -q "not npm ci" \
+    && ok "the clone notice warns that npm ci deletes the clone" \
+    || bad "the clone notice warns that npm ci deletes the clone" "$START_OUT"
+  exists "$DWT/deps2/node_modules/left-pad/index.js" "the stale install is cloned for an in-place update"
+elif printf '%s' "$START_OUT" | grep -q "copy-on-write cloning is not available"; then
+  ok "ws agent start says when copy-on-write cloning is not available"
+  not_exists "$DWT/deps2/node_modules" "and copies nothing in full instead"
+else
+  bad "ws agent start clones an install built from another lockfile and says to update it in place" "$START_OUT"
+fi
 git -C "$DEPS" checkout -q -- package-lock.json
 if grep -q '^agent_clone_deps' "$WS/workspace.conf"; then
   sed -i.bak 's/^agent_clone_deps.*/agent_clone_deps = off/' "$WS/workspace.conf"
@@ -2935,6 +2996,71 @@ printf '%s' "$DOC" | grep -qF ".local/worktrees/deps/deps2" \
   && bad "doctor does not flag worktrees ws agent start made" "$DOC" \
   || ok "doctor does not flag worktrees ws agent start made"
 git -C "$DEPS" worktree remove --force "$DEPS/.local/worktrees/nested" >/dev/null 2>&1
+
+section "worktrees other tools add get the shared install too"
+# Editors and other agents' harnesses run git worktree add themselves, so ws agent start
+# never sees their worktrees and each began with a full install. ws link installs a
+# post-checkout hook that runs ws agent deps in every new linked worktree.
+check "ws link installs the dependency hook" ws link deps
+DHOOK="$(git -C "$DEPS" rev-parse --path-format=absolute --git-path hooks/post-checkout)"
+contains "$DHOOK" '# ws-deps:' "the post-checkout hook is ours"
+HOOK_OUT="$(git -C "$DEPS" worktree add -q -b tool-made "$TMP/tool-made" 2>&1)"
+if printf '%s' "$HOOK_OUT" | grep -q "cloned 2 node_modules"; then
+  ok "a worktree another tool adds gets the primary install from the hook"
+  exists "$TMP/tool-made/node_modules/left-pad/index.js" "the hook cloned the root install"
+elif printf '%s' "$HOOK_OUT" | grep -q "copy-on-write cloning is not available"; then
+  ok "the hook says when copy-on-write cloning is not available"
+else
+  bad "a worktree another tool adds gets the primary install from the hook" "$HOOK_OUT"
+fi
+rm -rf "$TMP/tool-made/node_modules" "$TMP/tool-made/apps/web/node_modules"
+HOOK_OUT="$(git -C "$TMP/tool-made" checkout -q -b tool-made-2 2>&1)"
+not_exists "$TMP/tool-made/node_modules" "a branch switch in an existing worktree does not run the clone"
+HOOK_OUT="$(WS_NO_DEPS_HOOK=1 git -C "$DEPS" worktree add -q -b tool-quiet "$TMP/tool-quiet" 2>&1)"
+printf '%s' "$HOOK_OUT" | grep -q "node_modules" \
+  && bad "WS_NO_DEPS_HOOK=1 skips the hook" "$HOOK_OUT" \
+  || ok "WS_NO_DEPS_HOOK=1 skips the hook"
+not_exists "$TMP/tool-quiet/node_modules" "nothing is cloned when the hook is skipped"
+DEPS_OUT="$(ws agent deps "$TMP/tool-quiet" 2>&1)"
+if printf '%s' "$DEPS_OUT" | grep -q "cloned 2 node_modules"; then
+  ok "ws agent deps fills a worktree another tool made"
+  exists "$TMP/tool-quiet/apps/web/node_modules/tiny/index.js" "ws agent deps cloned a workspace package's install"
+elif printf '%s' "$DEPS_OUT" | grep -q "copy-on-write cloning is not available"; then
+  ok "ws agent deps says when copy-on-write cloning is not available"
+else
+  bad "ws agent deps fills a worktree another tool made" "$DEPS_OUT"
+fi
+check_fails "ws agent deps refuses a primary checkout" ws agent deps "$DEPS"
+check_fails "ws agent deps refuses a folder outside git" ws agent deps "$TMP"
+check_fails "ws agent deps takes one path" ws agent deps "$TMP/tool-quiet" "$TMP/tool-made"
+# ws agent start clones by itself and keeps its own git worktree add from running the hook.
+printf '#!/bin/sh\n# ws-deps: test probe\n[ -n "${WS_NO_DEPS_HOOK:-}" ] || touch "%s"\n' "$TMP/deps-hook-ran" > "$DHOOK"
+WS_SESSION_ID=deps4 ws agent start deps "hook and start" >/dev/null 2>&1
+not_exists "$TMP/deps-hook-ran" "ws agent start does not run the dependency hook as well"
+WS_SESSION_ID=deps4 ws agent stop >/dev/null 2>&1
+check "ws link replaces its own hook" ws link deps
+lacks "$DHOOK" 'test probe' "the replaced hook is the installed one"
+
+printf '#!/bin/sh\necho theirs\n' > "$DHOOK"
+LINK_OUT="$(ws link deps 2>&1)"
+contains "$DHOOK" 'echo theirs' "ws link leaves a post-checkout hook that is not ours"
+printf '%s' "$LINK_OUT" | grep -q "post-checkout hook exists and is not ours" \
+  && ok "ws link says how to fill worktrees when the hook is not ours" \
+  || bad "ws link says how to fill worktrees when the hook is not ours" "$LINK_OUT"
+rm -f "$DHOOK"
+git -C "$DEPS" config core.hooksPath "$TMP/shared-hooks"
+LINK_OUT="$(ws link deps 2>&1)"
+not_exists "$TMP/shared-hooks/post-checkout" "the hook is never written into a hooks directory outside .git"
+printf '%s' "$LINK_OUT" | grep -q "core.hooksPath is outside .git" \
+  && ok "ws link says why the hook was not installed" \
+  || bad "ws link says why the hook was not installed" "$LINK_OUT"
+git -C "$DEPS" config --unset core.hooksPath
+rm -rf "$TMP/shared-hooks"
+check "ws link reinstalls the dependency hook" ws link deps
+check "ws unlink" ws unlink deps
+not_exists "$DHOOK" "ws unlink removes the dependency hook"
+git -C "$DEPS" worktree remove --force "$TMP/tool-made" >/dev/null 2>&1
+git -C "$DEPS" worktree remove --force "$TMP/tool-quiet" >/dev/null 2>&1
 
 section "public CI governance stays deterministic"
 GOVERNANCE="$SRC/.github/workflows/agentic-governance.yml"
