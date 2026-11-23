@@ -53,3 +53,10 @@ atlas_dir =
 # without activity, when no process works inside the worktree.
 min_free_disk_gb = 20
 worktree_idle_hours = 24
+
+# A new agent worktree gets the primary checkout's node_modules as copy-on-write clones
+# (APFS, or a reflink filesystem) when the lockfile matches; nothing is copied in full.
+# `ws agent prune` drops these git-ignored directories from worktrees idle for
+# worktree_idle_hours; leave agent_prune_dirs empty to keep the built-in list.
+agent_clone_deps = on
+agent_prune_dirs =

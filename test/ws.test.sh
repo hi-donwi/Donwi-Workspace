@@ -1492,7 +1492,7 @@ PY
 }
 check "each prompt clocks in" hook_has UserPromptSubmit "ws agent auto in"
 check "each turn clocks out" hook_has Stop "ws agent auto out"
-check "the session end clocks out" hook_has SessionEnd "ws agent auto out"
+check "the session end clocks out and releases its locks" hook_has SessionEnd "ws agent auto end"
 check_fails "session start does not clock in" hook_has SessionStart "ws agent auto in"
 
 check "auto out is a no-op when nothing is running" ws agent auto out
@@ -1508,6 +1508,18 @@ printf '%s' "$STATUS" | grep -q 'api' \
   && ok "the project is resolved from the working directory" \
   || bad "the project is resolved from the working directory" "$STATUS"
 check "auto out closes it" ws agent auto out
+
+# Agents rarely run `ws agent stop`, so the session end hook releases the session's
+# worktree locks itself; the worktree and its work stay where they are.
+WS_SESSION_ID=endlock ws agent start api "ends without a stop" >/dev/null 2>&1
+exists "$gdir/ws-agent-sessions/endlock.lock" "a started session holds its lock"
+WS_SESSION_ID=endlock check "auto end at the session end" ws agent auto end
+not_exists "$gdir/ws-agent-sessions/endlock.lock" "the session end releases the product lock"
+not_exists "$CGDIR/ws-agent-sessions/endlock.lock" "and the context lock"
+exists "$WS/.local/worktrees/api/endlock/.git" "the worktree is kept"
+STATUS="$(WS_SESSION_ID=endlock ws agent status 2>&1)"
+printf '%s' "$STATUS" | grep -q 'no open session' \
+  && ok "the session end closes the clock" || bad "the session end closes the clock" "$STATUS"
 
 # Everyone is told to open the editor at the workspace root, where the directory
 # walk resolves nothing. A session that has said which project it is on is the
@@ -2756,6 +2768,112 @@ for K in $SH_KINDS; do
   exists "$SRC/.agents/templates/run-brief.$K.md" "kind $K has a run brief"
   exists "$SRC/.agents/templates/memory-project.$K.md" "kind $K has a project memory template"
 done
+
+section "agent worktrees share dependencies and give them back when idle"
+# Every new worktree used to run its own install: a 31 MB repository carried 700 MB of
+# node_modules per session, never shared. `ws agent start` clones the primary checkout's
+# install copy-on-write when the lockfile matches, and `ws agent prune` drops ignored,
+# regenerable directories from worktrees nobody has used for worktree_idle_hours.
+DEPS="$WS/projects/acme/deps"
+DWT="$WS/.local/worktrees/deps"
+mkdir -p "$DEPS/apps/web" "$DEPS/build" && git -C "$DEPS" init -q
+printf 'node_modules/\ndist/\n.wrangler/\n.local/\n' > "$DEPS/.gitignore"
+printf '{"lockfileVersion":3}\n' > "$DEPS/package-lock.json"
+printf 'export {}\n' > "$DEPS/apps/web/index.js"
+printf 'tracked\n' > "$DEPS/build/keep.txt"
+git -C "$DEPS" add -A && git -C "$DEPS" commit -qm init
+mkdir -p "$DEPS/node_modules/left-pad" "$DEPS/apps/web/node_modules/tiny" \
+  "$DEPS/.local/scratch/node_modules/stray"
+printf 'module.exports = 1\n' > "$DEPS/node_modules/left-pad/index.js"
+printf 'module.exports = 2\n' > "$DEPS/apps/web/node_modules/tiny/index.js"
+check "registers a product with an npm install" ws new deps projects/acme/deps --client acme
+
+START_OUT="$(WS_SESSION_ID=deps1 ws agent start deps "shared install" 2>&1)"
+if printf '%s' "$START_OUT" | grep -q "cloned 2 node_modules"; then
+  ok "ws agent start clones the primary install when the lockfile matches"
+  exists "$DWT/deps1/node_modules/left-pad/index.js" "the root install is cloned"
+  exists "$DWT/deps1/apps/web/node_modules/tiny/index.js" "a workspace package's install is cloned"
+elif printf '%s' "$START_OUT" | grep -q "copy-on-write cloning is not available"; then
+  ok "ws agent start says when copy-on-write cloning is not available"
+  not_exists "$DWT/deps1/node_modules" "and copies nothing in full instead"
+else
+  bad "ws agent start clones the primary install when the lockfile matches" "$START_OUT"
+fi
+not_exists "$DWT/deps1/.local" "an install outside the tracked tree is never cloned"
+printf '{"lockfileVersion":3,"changed":true}\n' > "$DEPS/package-lock.json"
+START_OUT="$(WS_SESSION_ID=deps2 ws agent start deps "new lockfile" 2>&1)"
+printf '%s' "$START_OUT" | grep -q "lockfile differs" \
+  && ok "ws agent start does not clone an install built from another lockfile" \
+  || bad "ws agent start does not clone an install built from another lockfile" "$START_OUT"
+not_exists "$DWT/deps2/node_modules" "the worktree gets no stale install"
+git -C "$DEPS" checkout -q -- package-lock.json
+if grep -q '^agent_clone_deps' "$WS/workspace.conf"; then
+  sed -i.bak 's/^agent_clone_deps.*/agent_clone_deps = off/' "$WS/workspace.conf"
+else printf '\nagent_clone_deps = off\n' >> "$WS/workspace.conf"; fi
+START_OUT="$(WS_SESSION_ID=deps3 ws agent start deps "clone off" 2>&1)"
+printf '%s' "$START_OUT" | grep -q "node_modules" \
+  && bad "agent_clone_deps = off turns the clone off" "$START_OUT" \
+  || ok "agent_clone_deps = off turns the clone off"
+not_exists "$DWT/deps3/node_modules" "nothing is cloned with the switch off"
+sed -i.bak 's/^agent_clone_deps = off$/agent_clone_deps = on/' "$WS/workspace.conf" && rm -f "$WS/workspace.conf.bak"
+
+# deps2 holds work in progress next to its install and build output; deps3 is idle
+# but a process works inside it; a nested worktree was made by hand inside the product.
+mkdir -p "$DWT/deps2/node_modules/a" "$DWT/deps2/apps/web/node_modules/b" \
+  "$DWT/deps2/dist" "$DWT/deps2/.wrangler/state" "$DWT/deps2/coverage" "$DWT/deps3/node_modules/c"
+printf 'wip\n' >> "$DWT/deps2/apps/web/index.js"
+printf 'untracked report\n' > "$DWT/deps2/coverage/report.txt"
+check "a worktree made by hand inside the product repo" \
+  git -C "$DEPS" worktree add -q -b nested "$DEPS/.local/worktrees/nested"
+mkdir -p "$DEPS/.local/worktrees/nested/node_modules/z"
+for s in deps1 deps2 deps3; do WS_SESSION_ID=$s ws agent stop >/dev/null 2>&1; done
+PRUNE_OUT="$(ws agent prune 2>&1)"
+printf '%s' "$PRUNE_OUT" | grep -q "keep  .local/worktrees/deps/deps2 (used 0h ago)" \
+  && ok "ws agent prune keeps the dependencies of a worktree used inside the idle window" \
+  || bad "ws agent prune keeps the dependencies of a worktree used inside the idle window" "$PRUNE_OUT"
+for wt in "$DWT/deps1" "$DWT/deps2" "$DWT/deps3" "$DEPS/.local/worktrees/nested"; do
+  wgdir="$(git -C "$wt" rev-parse --path-format=absolute --git-dir)"
+  touch -t 202001010000 "$wgdir/index" "$wgdir/HEAD" "$wgdir/logs/HEAD"
+done
+touch -t 202001010000 "$DWT/deps2/apps/web/index.js" "$DWT/deps2/coverage/report.txt"
+(cd "$DWT/deps3" && exec sleep 60) &
+HOLD=$!
+PRUNE_OUT="$(ws agent prune 2>&1)"
+printf '%s' "$PRUNE_OUT" | grep -q "prune .local/worktrees/deps/deps2/node_modules" \
+  && ok "ws agent prune lists the install of an idle worktree with uncommitted work" \
+  || bad "ws agent prune lists the install of an idle worktree with uncommitted work" "$PRUNE_OUT"
+printf '%s' "$PRUNE_OUT" | grep -q "keep  .local/worktrees/deps/deps3 (in use)" \
+  && ok "ws agent prune keeps a worktree a process works in" \
+  || bad "ws agent prune keeps a worktree a process works in" "$PRUNE_OUT"
+printf '%s' "$PRUNE_OUT" | grep -q "prune projects/acme/deps/.local/worktrees/nested/node_modules" \
+  && ok "ws agent prune covers a registered worktree outside .local/worktrees" \
+  || bad "ws agent prune covers a registered worktree outside .local/worktrees" "$PRUNE_OUT"
+exists "$DWT/deps2/node_modules/a" "ws agent prune without --apply removes nothing"
+check "ws agent prune --apply" ws agent prune --apply
+not_exists "$DWT/deps2/node_modules" "the root install is removed"
+not_exists "$DWT/deps2/apps/web/node_modules" "a nested install is removed"
+not_exists "$DWT/deps2/dist" "ignored build output is removed"
+not_exists "$DWT/deps2/.wrangler" "ignored local runtime state is removed"
+exists "$DWT/deps2/coverage/report.txt" "an untracked directory that is not ignored is kept"
+exists "$DWT/deps2/build/keep.txt" "a tracked directory with a build name is kept"
+contains "$DWT/deps2/apps/web/index.js" "wip" "uncommitted source is kept"
+exists "$DWT/deps3/node_modules/c" "the busy worktree keeps its install"
+not_exists "$DEPS/.local/worktrees/nested/node_modules" "the nested worktree's install is removed"
+exists "$DEPS/node_modules/left-pad/index.js" "the primary checkout's install is never pruned"
+check_fails "ws agent prune refuses a non-numeric idle window" ws agent prune --idle-hours soon
+kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null || true
+
+DOC="$(ws doctor 2>&1 || true)"
+printf '%s' "$DOC" | grep -q "git worktree(s) outside .local/worktrees/<key>/<session>" \
+  && ok "doctor warns about worktrees that ws agent start did not make" \
+  || bad "doctor warns about worktrees that ws agent start did not make" "$DOC"
+printf '%s' "$DOC" | grep -qF "projects/acme/deps/.local/worktrees/nested" \
+  && ok "doctor names the unmanaged worktree" \
+  || bad "doctor names the unmanaged worktree" "$DOC"
+printf '%s' "$DOC" | grep -qF ".local/worktrees/deps/deps2" \
+  && bad "doctor does not flag worktrees ws agent start made" "$DOC" \
+  || ok "doctor does not flag worktrees ws agent start made"
+git -C "$DEPS" worktree remove --force "$DEPS/.local/worktrees/nested" >/dev/null 2>&1
 
 section "public CI governance stays deterministic"
 GOVERNANCE="$SRC/.github/workflows/agentic-governance.yml"

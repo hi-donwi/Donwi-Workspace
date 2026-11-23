@@ -8,6 +8,8 @@
     "anyone remembering: the clock opens when a prompt is submitted and closes when the",
     "turn stops or the session ends, so time spent waiting for a person is not agent",
     "time. Human hours stay manual on purpose: `ws clock in/out`.",
+    "At the session end `ws agent auto end` also releases the session's worktree locks",
+    "(the worktrees stay), since agents rarely run `ws agent stop`.",
     "`ws agent auto` never fails and records nothing when it cannot tell which",
     "project the session belongs to - an hour on the wrong project is worse than none.",
     "",
@@ -89,7 +91,7 @@
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.agents/bin/ws agent auto out || true" },
+          { "type": "command", "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.agents/bin/ws agent auto end || true" },
           { "type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.agents/bin/ws_activity.py hook \"${CLAUDE_PROJECT_DIR:-.}\" || true" }
         ]
       }

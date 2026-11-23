@@ -2577,10 +2577,11 @@ cmd_agent() {
     start) shift; agent_start "$@" ;;
     stop) shift; agent_stop "$@" ;;
     clean) shift; agent_clean "$@" ;;
+    prune) shift; agent_prune "$@" ;;
     status) clock_status ;;
     auto) shift; agent_auto "${1:-}" ;;
     activity) shift; agent_activity "$@" ;;
-    *) die "usage: ws agent [in <key> [note] | start <key> [note] | stop [note] | clean [--apply] [--idle-hours <n>] | out [note] | recover [--all] [--dry-run] [--end <iso>] | status | auto in|out | activity <state> [detail]|off]" ;;
+    *) die "usage: ws agent [in <key> [note] | start <key> [note] | stop [note] | clean [--apply] [--idle-hours <n>] | prune [--apply] [--idle-hours <n>] | out [note] | recover [--all] [--dry-run] [--end <iso>] | status | auto in|out|end | activity <state> [detail]|off]" ;;
   esac
 }
 
@@ -2707,8 +2708,10 @@ agent_start() {
     local br; br="$(slug "agent-$session-$key")"
     if git -C "$dst" show-ref --verify --quiet "refs/heads/$br"; then
       git -C "$dst" worktree add "$wt" "$br"
+      agent_clone_deps "$dst" "$wt"
     elif git -C "$dst" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
       git -C "$dst" worktree add -b "$br" "$wt"
+      agent_clone_deps "$dst" "$wt"
     else
       local baseline; baseline="$(agent_snapshot_commit "$dst")" \
         || die "could not create a local baseline for the unborn repository: $dst"
@@ -2749,24 +2752,31 @@ agent_stop() {
   else
     c_dim "no open agent clock for session $session"
   fi
-  local folder dst gdir
-  while IFS=$'\t' read -r key _ _ folder _ _ _ _; do
+  release_session_locks "$session"
+  c_grn "-> agent stop (session $session); worktree kept under .local/worktrees/"
+  c_dim "  remove idle clean worktrees with: ws agent clean (lists), ws agent clean --apply"
+}
+
+# release_session_locks <session>: drop the session's lock in every registered repository,
+# the framework clone and the context repository. The worktrees stay.
+release_session_locks() {
+  local session="$1" folder dst gdir
+  while IFS=$'\t' read -r _ _ _ folder _ _ _ _; do
     [ -n "$folder" ] && [ "$folder" != "-" ] || continue
     dst="$(repo_path "$folder")"
     is_repo "$dst" || continue
     gdir="$(agent_git_dir "$dst")"
-    [ -f "$gdir/ws-agent-sessions/$session.lock" ] && rm -f "$gdir/ws-agent-sessions/$session.lock"
+    if [ -f "$gdir/ws-agent-sessions/$session.lock" ]; then rm -f "$gdir/ws-agent-sessions/$session.lock"; fi
   done < <(reg_rows)
   if is_repo "$ROOT"; then
     gdir="$(agent_git_dir "$ROOT")"
-    [ -f "$gdir/ws-agent-sessions/$session.lock" ] && rm -f "$gdir/ws-agent-sessions/$session.lock"
+    if [ -f "$gdir/ws-agent-sessions/$session.lock" ]; then rm -f "$gdir/ws-agent-sessions/$session.lock"; fi
   fi
   if is_repo "$CONTEXT_DIR"; then
     gdir="$(agent_git_dir "$CONTEXT_DIR")"
-    [ -f "$gdir/ws-agent-sessions/$session.lock" ] && rm -f "$gdir/ws-agent-sessions/$session.lock"
+    if [ -f "$gdir/ws-agent-sessions/$session.lock" ]; then rm -f "$gdir/ws-agent-sessions/$session.lock"; fi
   fi
-  c_grn "-> agent stop (session $session); worktree kept under .local/worktrees/"
-  c_dim "  remove idle clean worktrees with: ws agent clean (lists), ws agent clean --apply"
+  return 0
 }
 
 # Newest modification time (epoch seconds) among the files that exist; 0 if none.
@@ -3228,12 +3238,216 @@ auto_project_key() {
   printf '%s' "$key"
 }
 
+# ─────────────────────────────────────────────────── agent worktree dependencies
+# One full install per worktree was most of the disk agent worktrees took: a small
+# repository carried hundreds of MB of node_modules per session, never shared, and kept it
+# long after the session ended. `ws agent start` clones the primary checkout's install
+# copy-on-write; `ws agent prune` drops regenerable output from idle worktrees.
+DEPS_LOCKFILES="package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb"
+AGENT_PRUNE_DIRS="node_modules .next .turbo .svelte-kit .parcel-cache .wrangler .dart_tool build dist target coverage test-results playwright-report"
+
+# Working directory and executable of every running process, one real path per line: an
+# app started from a worktree's build output keeps that worktree in use even when its
+# working directory is elsewhere. Empty output means the processes could not be seen.
+process_paths() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -w -d cwd,txt -Fn 2>/dev/null | sed -n 's/^n//p'
+  elif [ -d /proc/self ]; then
+    local p
+    for p in /proc/[0-9]*/cwd /proc/[0-9]*/exe; do readlink "$p" 2>/dev/null; done
+  fi
+  return 0
+}
+
+# The linked worktrees of one repository, primary checkout left out.
+agent_repo_worktrees() {
+  local p
+  git -C "$1" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | tail -n +2 \
+    | while IFS= read -r p; do if [ -d "$p" ]; then printf '%s\n' "$p"; fi; done || true
+  return 0
+}
+
+# Every linked worktree of the registered repositories and the framework clone, wherever
+# it was made: `git worktree list` knows the ones a glob over .local/worktrees misses.
+agent_linked_worktrees() {
+  local folder dst
+  {
+    while IFS=$'\t' read -r _ _ _ folder _ _ _ _; do
+      [ -n "$folder" ] && [ "$folder" != "-" ] || continue
+      dst="$(repo_path "$folder")"
+      if is_repo "$dst"; then agent_repo_worktrees "$dst"; fi
+    done < <(reg_rows)
+    if is_repo "$ROOT"; then agent_repo_worktrees "$ROOT"; fi
+    :
+  } | sort -u
+  return 0
+}
+
+# Linked worktrees that `ws agent start` did not make: anything but
+# .local/worktrees/<key>/<session>. Paths inside the workspace are printed relative to it.
+agent_unmanaged_worktrees() {
+  local home wt real rel
+  home="$(cd "$WS_HOME" && pwd -P)"
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    real="$(cd "$wt" 2>/dev/null && pwd -P)" || continue
+    case "$real" in
+      "$home"/*) rel="${real#"$home"/}" ;;
+      *) printf '%s\n' "$real"; continue ;;
+    esac
+    case "$rel" in
+      .local/worktrees/*/*/*) printf '%s\n' "$rel" ;;
+      .local/worktrees/*/*) ;;
+      *) printf '%s\n' "$rel" ;;
+    esac
+  done < <(agent_linked_worktrees)
+  return 0
+}
+
+# cow_clone_dir <src> <dst>: copy a directory tree copy-on-write, or fail and leave nothing
+# behind. Never a full copy: a silent fallback would be the disk growth this exists to stop.
+cow_clone_dir() {
+  local src="$1" dst="$2" mnt mounts
+  case "$(uname -s)" in
+    Darwin)
+      # cp -c falls back to a full copy across volumes or off APFS, so check both first.
+      [ "$(stat -f %d "$src" 2>/dev/null)" = "$(stat -f %d "$(dirname "$dst")" 2>/dev/null)" ] || return 1
+      mnt="$(df -P "$src" 2>/dev/null | awk 'NR==2 {print $NF}')" || mnt=""
+      mounts="$(mount 2>/dev/null)" || mounts=""
+      case "$mounts" in *" on $mnt (apfs"*) [ -n "$mnt" ] || return 1 ;; *) return 1 ;; esac
+      if cp -c -R "$src" "$dst" 2>/dev/null; then return 0; fi ;;
+    *)
+      if cp -R --reflink=always "$src" "$dst" 2>/dev/null; then return 0; fi ;;
+  esac
+  rm -rf "$dst"
+  return 1
+}
+
+# nearest_lockfile <repo> <dir relative to it>: the lockfile that governs that directory,
+# the nearest one at or above it.
+nearest_lockfile() {
+  local repo="$1" rel="$2" f
+  while :; do
+    for f in $DEPS_LOCKFILES; do
+      if [ -f "$repo/${rel:+$rel/}$f" ]; then printf '%s' "${rel:+$rel/}$f"; return 0; fi
+    done
+    [ -n "$rel" ] || return 1
+    case "$rel" in */*) rel="${rel%/*}" ;; *) rel="" ;; esac
+  done
+}
+
+# agent_clone_deps <primary> <worktree>: give a new worktree the primary checkout's
+# node_modules as copy-on-write clones, each only when the lockfile that governs it is
+# identical in both trees. A clone takes seconds and almost no disk until a file in it
+# changes. Only installs inside the tracked tree qualify, never another worktree's.
+# agent_clone_deps = off in workspace.conf turns it off.
+agent_clone_deps() {
+  local src="$1" wt="$2" dir rel parent lock n=0 unavailable=0
+  case "$(conf_get agent_clone_deps on)" in off|no|false|0) return 0 ;; esac
+  while IFS= read -r dir; do
+    rel="${dir#"$src"/}"; parent="$(dirname "$rel")"
+    [ "$parent" != . ] || parent=""
+    [ -z "$parent" ] || [ -d "$wt/$parent" ] || continue
+    [ ! -e "$wt/$rel" ] || continue
+    git -C "$src" check-ignore -q -- "$rel/x" 2>/dev/null || continue
+    lock="$(nearest_lockfile "$src" "$parent")" || continue
+    if ! cmp -s "$src/$lock" "$wt/$lock"; then
+      c_dim "  dependencies: $rel not cloned, its lockfile differs from the primary checkout"
+      continue
+    fi
+    [ "$unavailable" = 0 ] || continue
+    if cow_clone_dir "$dir" "$wt/$rel"; then n=$((n + 1)); else unavailable=1; fi
+  done < <(find "$src" -maxdepth 4 \( -name .git -o -name .local \) -prune -o \
+             -type d -name node_modules -print -prune 2>/dev/null | sort)
+  if [ "$n" -gt 0 ]; then
+    c_grn "-> cloned $n node_modules dir(s) from the primary checkout (copy-on-write); reinstall only when a lockfile changes"
+  elif [ "$unavailable" = 1 ]; then
+    c_dim "  dependencies: copy-on-write cloning is not available here; install them in the worktree"
+  fi
+  return 0
+}
+
+# Idle worktrees keep their installs and build output long after the work stops, and
+# uncommitted work keeps `ws agent clean` from removing them. Prune drops only what a
+# rebuild recreates: directories named in agent_prune_dirs that git ignores and tracks
+# nothing in, from worktrees with no process inside (working directory or running
+# executable) and no git or file activity for --idle-hours. Source, work in progress and
+# the worktree itself stay. Every worktree registered with the workspace's repositories is
+# scanned, wherever inside the workspace it was made; primary checkouts are never touched.
+agent_prune() {
+  local apply=0 idle; idle="$(conf_get worktree_idle_hours 24)"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1 ;;
+      --idle-hours) shift; idle="${1:-}" ;;
+      *) die "usage: ws agent prune [--apply] [--idle-hours <n>]" ;;
+    esac
+    shift
+  done
+  case "$idle" in ''|*[!0-9]*) die "--idle-hours takes a whole number of hours" ;; esac
+
+  local names expr=() name
+  names="$(conf_get agent_prune_dirs "$AGENT_PRUNE_DIRS")"
+  for name in $names; do
+    [ "${#expr[@]}" -eq 0 ] || expr+=(-o)
+    expr+=(-name "$name")
+  done
+  if [ "${#expr[@]}" -eq 0 ]; then c_dim "agent_prune_dirs is empty - nothing to prune"; return 0; fi
+
+  local home paths now wt real rel cdir gdir last changed age dir drel kb total=0 count=0
+  home="$(cd "$WS_HOME" && pwd -P)"
+  paths="$(process_paths)"
+  now="$(date +%s)"
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    real="$(cd "$wt" 2>/dev/null && pwd -P)" || continue
+    case "$real" in "$home"/*) ;; *) continue ;; esac
+    rel="${real#"$home"/}"
+    if worktree_in_use "$real" "$paths"; then c_dim "  keep  $rel (in use)"; continue; fi
+    cdir="$(agent_git_dir "$wt")" || cdir=""
+    gdir="$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || gdir=""
+    if [ -z "$gdir" ]; then c_ylw "  ! $rel is not a readable worktree"; continue; fi
+    last="$(newest_mtime "$gdir/index" "$gdir/HEAD" "$gdir/logs/HEAD" \
+      "${cdir:+$cdir/ws-agent-sessions/$(basename "$wt").lock}")"
+    changed="$(changed_mtime "$wt")"
+    if [ "$changed" -gt "$last" ]; then last="$changed"; fi
+    age=$(( (now - last) / 3600 ))
+    if [ "$age" -lt "$idle" ]; then c_dim "  keep  $rel (used ${age}h ago)"; continue; fi
+    while IFS= read -r dir; do
+      drel="${dir#"$wt"/}"
+      [ -z "$(git -C "$wt" ls-files -- "$drel" 2>/dev/null | head -1)" ] || continue
+      git -C "$wt" check-ignore -q -- "$drel/x" 2>/dev/null || continue
+      kb="$(du -sk "$dir" 2>/dev/null | cut -f1)" || true; kb="${kb:-0}"
+      if [ "$apply" = 0 ]; then
+        echo "  prune $rel/$drel ($((kb / 1024)) MB)"
+      elif rm -rf "$dir"; then
+        c_grn "  pruned $rel/$drel ($((kb / 1024)) MB)"
+      else
+        c_ylw "  ! could not remove $rel/$drel"; continue
+      fi
+      total=$((total + kb)); count=$((count + 1))
+    done < <(find "$wt" -mindepth 1 -name .git -prune -o -type d \( "${expr[@]}" \) -print -prune 2>/dev/null)
+  done < <(agent_linked_worktrees)
+  if [ "$apply" = 1 ]; then
+    c_grn "-> pruned $count dir(s), $((total / 1024)) MB, from idle worktrees"
+  elif [ "$count" -gt 0 ]; then
+    c_grn "-> $count regenerable dir(s), $((total / 1024)) MB, in idle worktrees; remove with: ws agent prune --apply"
+  else
+    c_dim "nothing to prune (idle window ${idle}h)"
+  fi
+}
+
 agent_auto() {
   local action="${1:-}"
-  case "$action" in in|out) ;; *) return 0 ;; esac
+  case "$action" in in|out|end) ;; *) return 0 ;; esac
 
-  if [ "$action" = out ]; then
+  if [ "$action" = out ] || [ "$action" = end ]; then
     [ -f "$(open_file agent)" ] && clock_out agent "auto" >/dev/null 2>&1
+    # `end` is the session end: agents rarely run `ws agent stop`, and a lock left behind
+    # makes a finished session look live to `ws agent clean`.
+    if [ "$action" = end ] && [ "$(session_id)" != default ]; then
+      release_session_locks "$(session_id)"
+    fi
     return 0
   fi
 
@@ -3801,12 +4015,20 @@ cmd_doctor() {
       if [ "$free_kb" -lt $((min_free * 1048576)) ]; then
         c_ylw "! $((free_kb / 1048576)) GB free on the workspace volume, below min_free_disk_gb ($min_free)"
         c_dim "    idle agent worktrees: ws agent clean, then ws agent clean --apply"
+        c_dim "    their installs and build output: ws agent prune, then ws agent prune --apply"
       else
         c_grn "ok $((free_kb / 1048576)) GB free on the workspace volume"
       fi
     fi
     wts="$(count_files "$WS_HOME/.local/worktrees" -mindepth 3 -maxdepth 3 -name .git)"
     [ "${wts:-0}" = "0" ] || c_dim "    $wts agent worktree(s) under .local/worktrees/ (ws agent clean lists the idle ones)"
+    local unmanaged
+    unmanaged="$(agent_unmanaged_worktrees)"
+    if [ -n "$unmanaged" ]; then
+      c_ylw "! $(printf '%s\n' "$unmanaged" | wc -l | tr -d ' ') git worktree(s) outside .local/worktrees/<key>/<session> - ws agent clean never removes them"
+      printf '%s\n' "$unmanaged" | head -5 | sed 's/^/      /'
+      c_dim "    make agent worktrees with ws agent start <key>; ws agent prune covers the ones inside the workspace"
+    fi
     echo
   fi
 
@@ -5014,6 +5236,8 @@ ws — engineering workspace CLI
   ws agent activity <state>|off     what this session is doing, for the desk
   ws agent clean [--apply] [--idle-hours N]
                                     list (or remove) idle, clean agent worktrees and stale locks
+  ws agent prune [--apply] [--idle-hours N]
+                                    list (or remove) installs and build output in idle worktrees
   ws hours [--month M] [--project k|--client c] [--rollup]   report both, side by side
   ws usage [--month M] [--project k|--client c]  token usage, from a separate optional tool
   ws chat [--dev] [--port N] [--no-brain]  the desk (DONWI Desk) and its DONWI Brain gateway
