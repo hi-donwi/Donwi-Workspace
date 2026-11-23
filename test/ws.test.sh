@@ -952,6 +952,67 @@ exists "$gdir/ws-agent-sessions/wt6.lock" "a lock whose worktree a process works
 kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null || true
 for s in wt5 wt6 wt7; do WS_SESSION_ID=$s ws agent stop >/dev/null 2>&1; done
 
+section "project-scoped worktree cleanup safety"
+for s in scoped-clean scoped-ignored scoped-process scoped-git-error; do
+  WS_SESSION_ID=$s ws agent start api >/dev/null 2>&1
+  WS_SESSION_ID=$s ws agent stop >/dev/null 2>&1
+done
+WS_SESSION_ID=other-clean ws agent start otherp >/dev/null 2>&1
+WS_SESSION_ID=other-clean ws agent stop >/dev/null 2>&1
+OTHER_WT="$WS/.local/worktrees/otherp"
+printf '\n/.local-secret\n' >> "$gdir/info/exclude"
+printf 'local configuration\n' > "$WT/scoped-ignored/.local-secret"
+printf 'project=api\nworktree=%s\n' "$WT/scoped-gone" > "$gdir/ws-agent-sessions/scoped-gone.lock"
+printf 'project=otherp\nworktree=%s\n' "$OTHER_WT/other-gone" > "$gdir/ws-agent-sessions/other-gone.lock"
+printf 'project=api\nworktree=%s\n' "$WT/shared-gone" > "$gdir/ws-agent-sessions/shared-gone.lock"
+printf 'project=api\n' > "$CGDIR/ws-agent-sessions/scoped-gone.lock"
+printf 'project=otherp\n' > "$CGDIR/ws-agent-sessions/shared-gone.lock"
+(cd "$WT/scoped-process" && touch "$TMP/scoped-process-ready" && exec sleep 60) &
+HOLD=$!
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  [ -e "$TMP/scoped-process-ready" ] && break
+  sleep 0.1
+done
+
+CLEAN_OUT="$(ws agent clean --project api --idle-hours 0 2>&1)"
+printf '%s' "$CLEAN_OUT" | grep -q 'clean .local/worktrees/api/scoped-clean' \
+  && ! printf '%s' "$CLEAN_OUT" | grep -qE 'other-clean|other-gone' \
+  && ok "scope limits both the worktree and orphan lock preview" \
+  || bad "scope limits both the worktree and orphan lock preview" "$CLEAN_OUT"
+exists "$WT/scoped-clean/.git" "scoped preview leaves the selected worktree in place"
+check_fails "worktree cleanup refuses unknown projects" ws agent clean --project unknown-cleanup-project --apply
+check_fails "worktree cleanup needs a project key" ws agent clean --project
+check "worktree cleanup recognizes the framework scope" ws agent clean --project workspace
+
+# Let all Git operations run normally except status.
+CLEAN_BIN="$TMP/worktree-clean-bin"
+mkdir -p "$CLEAN_BIN"
+cat > "$CLEAN_BIN/git" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = status ]; then exit 1; fi
+done
+exec "$WS_TEST_GIT" "$@"
+EOF
+chmod +x "$CLEAN_BIN/git"
+CLEAN_OUT="$(WS_TEST_GIT="$(command -v git)" PATH="$CLEAN_BIN:$PATH" \
+  ws agent clean --project api --apply --idle-hours 0 2>&1)"
+printf '%s' "$CLEAN_OUT" | grep -q 'scoped-git-error (git status failed)' \
+  && ok "failed Git status is visible in the cleanup report" \
+  || bad "failed Git status is visible in the cleanup report" "$CLEAN_OUT"
+exists "$WT/scoped-git-error/.git" "failed Git status prevents worktree deletion"
+
+check "scoped cleanup removes eligible worktrees" ws agent clean --project api --apply --idle-hours 0
+not_exists "$WT/scoped-clean" "scoped cleanup removed the eligible worktree"
+exists "$WT/scoped-ignored/.local-secret" "cleanup preserves ignored local configuration"
+exists "$WT/scoped-process/.git" "cleanup keeps a worktree with a running process and no lock"
+exists "$OTHER_WT/other-clean/.git" "scoped apply leaves another project's clean worktree in place"
+exists "$gdir/ws-agent-sessions/other-gone.lock" "scoped apply leaves another project's orphan lock in place"
+not_exists "$gdir/ws-agent-sessions/scoped-gone.lock" "scoped apply removes the selected project's orphan lock"
+not_exists "$CGDIR/ws-agent-sessions/scoped-gone.lock" "scoped apply drops the matching context lock"
+exists "$CGDIR/ws-agent-sessions/shared-gone.lock" "scoped apply keeps a context lock belonging to another project"
+kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null || true
+
 section "session bind (attention isolation)"
 # Git worktrees isolate HEAD. Session bind isolates what the agent is allowed
 # to load: one project pack per WS_SESSION_ID, never a sibling client.
