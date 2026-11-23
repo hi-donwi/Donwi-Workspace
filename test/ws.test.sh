@@ -976,9 +976,10 @@ printf '\nworktree_archive_max_mb = 1\n' >> "$WS/workspace.conf"
 # A program started from a worktree's install keeps it in use while its working
 # directory is elsewhere and no session lock is left.
 mkdir -p "$WT/scoped-exe/node_modules/.bin"
-cp "$(command -v sleep)" "$WT/scoped-exe/node_modules/.bin/holder"
+# The copy keeps its name: a multicall coreutils picks the utility by argv[0].
+cp "$(command -v sleep)" "$WT/scoped-exe/node_modules/.bin/sleep"
 # Started from a subshell that exits at once, so this shell never reports its end.
-HOLD_EXE="$( (cd "$TMP" && exec "$WT/scoped-exe/node_modules/.bin/holder" 60) >/dev/null 2>&1 & echo $! )"
+HOLD_EXE="$( (cd "$TMP" && exec "$WT/scoped-exe/node_modules/.bin/sleep" 60) >/dev/null 2>&1 & echo $! )"
 printf 'project=api\nworktree=%s\n' "$WT/scoped-gone" > "$gdir/ws-agent-sessions/scoped-gone.lock"
 printf 'project=otherp\nworktree=%s\n' "$OTHER_WT/other-gone" > "$gdir/ws-agent-sessions/other-gone.lock"
 printf 'project=api\nworktree=%s\n' "$WT/shared-gone" > "$gdir/ws-agent-sessions/shared-gone.lock"
